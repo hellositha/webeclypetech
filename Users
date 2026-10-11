@@ -1,0 +1,23 @@
+ ### How to Run on Another Server                                                                               |
+                                                                                                                 |
+  #### Option 1: Standard One-Command Setup                                                                      |
+                                                                                                                 |
+    # Clone the repository onto the new server                                                                   |
+    git clone <your-repo-url> /root/eclypetech                                                                   |
+    cd /root/eclypetech                                                                                          |
+                                                                                                                 |
+    # Make executable and run as root                                                                            |
+    chmod +x setup.sh                                                                                            |
+    sudo ./setup.sh                                                                                              |
+                                                                                                                 |
+  #### Option 2: Custom Parameters                                                                               |
+                                                                                                                 |
+    # Custom domain and database password:                                                                       |
+    sudo ./setup.sh --domain mydomain.com --db-pass MySecretPassword123!                                         |
+                                                                                                                 |
+    # Skip SSL (e.g. for staging or behind Cloudflare):                                                          |
+    sudo ./setup.sh --skip-ssl                                                                                   |
+                                                                                                                 |
+    # Skip firewall setup (if managed externally by AWS/DigitalOcean security groups):                           |
+    sudo ./setup.sh --skip-firewall                                                                              |
+                                                                    
