@@ -42,11 +42,17 @@ while [[ "$#" -gt 0 ]]; do
         --skip-firewall) SKIP_FIREWALL=true ;;
         --domain) DOMAIN="$2"; WWW_DOMAIN="www.$2"; shift ;;
         --db-pass) DB_PASS="$2"; shift ;;
+        --db-user) DB_USER="$2"; shift ;;
+        --db-name) DB_NAME="$2"; shift ;;
+        --app-port) APP_PORT="$2"; shift ;;
         --help)
             echo "Usage: sudo bash setup.sh [OPTIONS]"
             echo "Options:"
             echo "  --domain <domain>    Set primary domain (default: eclypetech.biz)"
             echo "  --db-pass <password> Set database password (default: internova123)"
+            echo "  --db-user <user>     Set database user (default: internova)"
+            echo "  --db-name <name>     Set database name (default: eclypetech)"
+            echo "  --app-port <port>    Set Next.js app port (default: 3000)"
             echo "  --skip-ssl           Skip Let's Encrypt SSL issuance"
             echo "  --skip-firewall      Skip UFW and Fail2ban configuration"
             exit 0
@@ -107,14 +113,28 @@ if command -v node >/dev/null 2>&1; then
 fi
 
 if [ "$NODE_NEED_INSTALL" = true ]; then
-    log_info "Installing Node.js 20.x LTS from NodeSource..."
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg --yes
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
-    apt-get update -y
-    apt-get install -y nodejs
+    log_info "Installing Node.js..."
+    if ! apt-get install -y nodejs npm; then
+        log_info "Attempting NodeSource repository..."
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg --yes || true
+        echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
+        apt-get update -y || true
+        apt-get install -y nodejs npm
+    fi
 fi
+
+# Ensure npm package is installed and available
+if ! command -v npm >/dev/null 2>&1; then
+    log_info "Installing npm package..."
+    apt-get install -y npm
+fi
+
 log_success "Node.js $(node -v) and npm $(npm -v) confirmed."
+
+# Pre-seed Debconf for unattended Postfix installation
+echo "postfix postfix/mailname string ${DOMAIN}" | debconf-set-selections 2>/dev/null || true
+echo "postfix postfix/main_mailer_type string 'Internet Site'" | debconf-set-selections 2>/dev/null || true
 
 # Install PostgreSQL, Nginx, Mail Daemons, and Security Tools
 log_info "Installing PostgreSQL, Nginx, Postfix, Dovecot, UFW, and Fail2ban..."
@@ -147,15 +167,15 @@ systemctl enable postgresql
 systemctl start postgresql
 
 log_info "Setting up database user and permissions..."
-su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}'\" | grep -q 1 || psql -c \"CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';\""
-su - postgres -c "psql -c \"ALTER USER ${DB_USER} WITH PASSWORD '${DB_PASS}';\""
-su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'\" | grep -q 1 || psql -c \"CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};\""
-su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};\""
+su - postgres -c "psql -P pager=off -tc \"SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}'\" | grep -q 1 || psql -P pager=off -c \"CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';\""
+su - postgres -c "psql -P pager=off -c \"ALTER USER ${DB_USER} WITH PASSWORD '${DB_PASS}';\""
+su - postgres -c "psql -P pager=off -tc \"SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'\" | grep -q 1 || psql -P pager=off -c \"CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};\""
+su - postgres -c "psql -P pager=off -c \"GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};\""
 
 log_info "Executing database schema & seed scripts..."
 if [ -f "${APP_DIR}/database/schema.sql" ]; then
     log_info "Loading schema from ${APP_DIR}/database/schema.sql..."
-    su - postgres -c "psql -d ${DB_NAME} -f \"${APP_DIR}/database/schema.sql\""
+    su - postgres -c "psql -P pager=off -d ${DB_NAME}" < "${APP_DIR}/database/schema.sql"
 else
     log_warn "${APP_DIR}/database/schema.sql not found. Creating baseline tables directly..."
     su - postgres -c "psql -d ${DB_NAME}" << 'EOSQL'
@@ -316,7 +336,7 @@ EOSQL
 fi
 
 # Ensure user permissions
-su - postgres -c "psql -d ${DB_NAME} -c \"GRANT ALL ON ALL TABLES IN SCHEMA public TO ${DB_USER}; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};\""
+su - postgres -c "psql -P pager=off -d ${DB_NAME} -c \"GRANT ALL ON ALL TABLES IN SCHEMA public TO ${DB_USER}; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER}; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${DB_USER}; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${DB_USER};\""
 log_success "PostgreSQL database and schema configured successfully."
 
 # ==============================================================================
@@ -339,6 +359,10 @@ NEXT_PUBLIC_COMPANY_ADDRESS="#25G, Chaomchao 3, Porsenchey, Phnom Penh, Cambodia
 JWT_SECRET="eclype_tech_enterprise_jwt_secret_key_2026_secured_98f12a"
 EOF
     cp "${APP_DIR}/.env" "${APP_DIR}/.env.local"
+else
+    if [ ! -f "${APP_DIR}/.env.local" ]; then
+        cp "${APP_DIR}/.env" "${APP_DIR}/.env.local"
+    fi
 fi
 
 log_info "Installing npm dependencies..."
@@ -353,6 +377,8 @@ log_success "Next.js application built cleanly."
 # ==============================================================================
 log_step "Step 4: Configuring Systemd Service (eclypetech.service)"
 
+NPM_BIN="$(command -v npm || echo /usr/bin/npm)"
+
 cat > /etc/systemd/system/eclypetech.service << EOF
 [Unit]
 Description=ECLYPE Technology Next.js Production Service
@@ -365,7 +391,7 @@ WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
 Environment=PORT=${APP_PORT}
 Environment=DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}
-ExecStart=$(which npm) run start -- -p ${APP_PORT}
+ExecStart=${NPM_BIN} run start -- -p ${APP_PORT}
 Restart=always
 RestartSec=3
 
@@ -376,6 +402,7 @@ EOF
 systemctl daemon-reload
 systemctl enable eclypetech.service
 systemctl restart eclypetech.service
+sleep 2
 log_success "eclypetech.service enabled and started on port ${APP_PORT}."
 
 # ==============================================================================
@@ -392,6 +419,11 @@ if ! getent passwd vmail >/dev/null; then
 fi
 
 mkdir -p /var/mail/vhosts/${DOMAIN}
+for ACC in admin contact support sarah.ops; do
+    mkdir -p "/var/mail/vhosts/${DOMAIN}/${ACC}/Maildir/cur"
+    mkdir -p "/var/mail/vhosts/${DOMAIN}/${ACC}/Maildir/new"
+    mkdir -p "/var/mail/vhosts/${DOMAIN}/${ACC}/Maildir/tmp"
+done
 chown -R vmail:vmail /var/mail/vhosts
 chmod -R 770 /var/mail/vhosts
 
@@ -601,6 +633,7 @@ fi
 
 usermod -aG ssl-cert postfix || true
 usermod -aG ssl-cert dovecot || true
+usermod -aG ssl-cert www-data || true
 
 systemctl enable postfix dovecot
 systemctl restart postfix dovecot
@@ -641,7 +674,7 @@ server {
     listen [::]:443 ssl default_server;
     http2 on;
 
-    server_name ${WWW_DOMAIN} localhost _;
+    server_name ${WWW_DOMAIN} ${DOMAIN} localhost _;
 
     # SSL Certificates
     ssl_certificate ${NGINX_CERT};
@@ -650,7 +683,7 @@ server {
     # Modern TLS Security
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:10m;
     ssl_session_tickets off;
@@ -691,7 +724,7 @@ log_success "Nginx reverse proxy active."
 # Attempt Let's Encrypt SSL issuance if enabled and not already active
 if [ "$SKIP_SSL" = false ] && [ ! -f "/etc/letsencrypt/live/${WWW_DOMAIN}/fullchain.pem" ]; then
     log_info "Checking if ${WWW_DOMAIN} resolves to this server before requesting Let's Encrypt..."
-    SERVER_IP=$(curl -s https://ifconfig.me || curl -s https://api.ipify.org || echo "")
+    SERVER_IP=$(curl -s --max-time 5 https://ifconfig.me || curl -s --max-time 5 https://api.ipify.org || echo "")
     DOMAIN_IP=$(python3 -c "import socket; print(socket.gethostbyname('${WWW_DOMAIN}'))" 2>/dev/null || echo "")
 
     if [ -n "$SERVER_IP" ] && [ "$SERVER_IP" = "$DOMAIN_IP" ]; then
@@ -727,14 +760,23 @@ if [ "$SKIP_FIREWALL" = false ]; then
     ufw allow in on lo comment 'Allow Loopback (Gemini/Antigravity/Internal Services)'
     ufw allow out on lo comment 'Allow Loopback Outbound'
     ufw allow 22/tcp comment 'SSH'
+    ufw allow 80/tcp comment 'HTTP - Web & ACME'
     ufw allow 443/tcp comment 'HTTPS - ECLYPE Platform'
+    ufw allow 25/tcp comment 'SMTP - Mail Gateway'
+    ufw allow 465/tcp comment 'SMTPS - Secure Mail'
+    ufw allow 587/tcp comment 'Submission - Mail Submission'
+    ufw allow 993/tcp comment 'IMAPS - Secure IMAP'
+    ufw allow 995/tcp comment 'POP3S - Secure POP3'
     ufw --force enable
 
     systemctl enable ufw
-    systemctl restart ufw
-    log_success "UFW firewall active (Ports 22 & 443 allowed, Loopback allowed, others blocked)."
+    systemctl restart ufw || systemctl start ufw
+    log_success "UFW firewall active (Web, Mail, and Management ports allowed)."
 
     # Configure Fail2ban
+    mkdir -p /var/log/nginx
+    touch /var/log/nginx/error.log
+
     cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 172.217.0.0/16 142.250.0.0/15 34.0.0.0/8 8.8.8.8 8.8.4.4
@@ -783,7 +825,18 @@ fi
 
 ALL_HEALTHY=true
 for SVC in "${SERVICES[@]}"; do
-    if systemctl is-active --quiet "$SVC"; then
+    SVC_ACTIVE=false
+    if [ "$SVC" = "ufw" ]; then
+        if ufw status | grep -q "Status: active" || systemctl is-active --quiet ufw; then
+            SVC_ACTIVE=true
+        fi
+    else
+        if systemctl is-active --quiet "$SVC"; then
+            SVC_ACTIVE=true
+        fi
+    fi
+
+    if [ "$SVC_ACTIVE" = true ]; then
         echo -e "  [${GREEN}ONLINE${NC}]  $SVC"
     else
         echo -e "  [${RED}OFFLINE${NC}] $SVC"
